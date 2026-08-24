@@ -26,6 +26,71 @@ let botState = {
   wasThrottled: false,
 };
 
+// Mineflayer does not support the new year-based Minecraft versions (26.x)
+// yet. ViaVersion can translate a supported client version to the server
+// version, so keep the fallback configurable in settings.json.
+let forcedClientVersion = null;
+let usingCompatibilityClient = false;
+
+function getConfiguredVersion() {
+  return typeof config.server.version === "string"
+    ? config.server.version.trim()
+    : "";
+}
+
+function getFallbackVersion() {
+  const fallback = config.server["fallback-version"];
+  return typeof fallback === "string" ? fallback.trim() : "";
+}
+
+function isUnsupportedYearBasedVersion(version) {
+  return /^(?:2[6-9]|[3-9]\d)\.\d+(?:\.\d+)?$/.test(version);
+}
+
+function getBotClientVersion() {
+  const configuredVersion = getConfiguredVersion();
+  const fallbackVersion = getFallbackVersion();
+
+  if (forcedClientVersion) {
+    usingCompatibilityClient = true;
+    return forcedClientVersion;
+  }
+
+  if (isUnsupportedYearBasedVersion(configuredVersion)) {
+    if (!fallbackVersion) {
+      throw new Error(
+        `Minecraft ${configuredVersion} is not supported by Mineflayer. Set server.fallback-version to a supported client version.`,
+      );
+    }
+
+    usingCompatibilityClient = true;
+    addLog(
+      `[Bot] Server is running Minecraft ${configuredVersion}; using compatible client ${fallbackVersion}. ViaVersion is required on the server.`,
+    );
+    return fallbackVersion;
+  }
+
+  usingCompatibilityClient = false;
+  return configuredVersion || false;
+}
+
+function switchToFallbackClient(errorMessage) {
+  const fallbackVersion = getFallbackVersion();
+  if (
+    !fallbackVersion ||
+    usingCompatibilityClient ||
+    !/unsupported protocol version/i.test(errorMessage)
+  ) {
+    return false;
+  }
+
+  forcedClientVersion = fallbackVersion;
+  addLog(
+    `[Bot] Mineflayer cannot use the server protocol directly. Retrying with client ${fallbackVersion}; install ViaVersion on the server if this fails.`,
+  );
+  return true;
+}
+
 // Health check endpoint for monitoring
 app.get('/', (req, res) => {
   res.send(`
@@ -1206,12 +1271,7 @@ function createBot() {
   addLog(`[Bot] Connecting to ${config.server.ip}:${config.server.port}`);
 
   try {
-    // FIX: use version:false to auto-detect server version so the bot can join any server.
-    // If the user explicitly sets a version in settings.json it is still respected.
-    const botVersion =
-      config.server.version && config.server.version.trim() !== ""
-        ? config.server.version
-        : false;
+    const botVersion = getBotClientVersion();
     bot = mineflayer.createBot({
       username: config["bot-account"].username,
       password: config["bot-account"].password || undefined,
@@ -1359,10 +1419,21 @@ function createBot() {
       const msg = err.message || "";
       addLog(`[Bot] Error: ${msg}`);
       botState.errors.push({ type: "error", message: msg, time: Date.now() });
+
+      if (switchToFallbackClient(msg)) {
+        try {
+          bot.end();
+        } catch (_) {
+          // The connection may already be closed after a protocol error.
+        }
+      }
+
       // Don't reconnect on error - let 'end' event handle it
     });
   } catch (err) {
-    addLog(`[Bot] Failed to create bot: ${err.message}`);
+    const message = err instanceof Error ? err.message : String(err);
+    addLog(`[Bot] Failed to create bot: ${message}`);
+    switchToFallbackClient(message);
     scheduleReconnect();
   }
 }
@@ -2070,7 +2141,8 @@ addLog("=".repeat(50));
 addLog("  Minecraft AFK Bot v2.5 - Bug-Fixed Edition");
 addLog("=".repeat(50));
 addLog(`Server: ${config.server.ip}:${config.server.port}`);
-addLog(`Version: ${config.server.version}`);
+addLog(`Server version: ${getConfiguredVersion() || "auto-detect"}`);
+addLog(`Fallback client: ${getFallbackVersion() || "not configured"}`);
 addLog(
   `Auto-Reconnect: ${config.utils["auto-reconnect"] ? "Enabled" : "Disabled"}`,
 );

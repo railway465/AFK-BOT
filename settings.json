@@ -9,6 +9,7 @@
     "ip": "Q8SMP.aternos.me",
     "port": 51104,
     "version": "26.2",
+    "fallback-version": "1.21.8",
     "try-creative": false
   },
   "position": {
