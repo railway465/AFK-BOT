@@ -6,8 +6,8 @@
     "type": "offline"
   },
   "server": {
-    "ip": "Q8SMP.aternos.me",
-    "port": 51104,
+    "ip": "q8smp-RQQG.aternos.me",
+    "port": 22241,
     "version": "26.2",
     "fallback-version": "1.21.8",
     "try-creative": false
