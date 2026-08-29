@@ -1054,6 +1054,9 @@ app.post("/stop", (req, res) => {
   if (!botRunning) return res.json({ success: false, msg: "Already stopped" });
 
   botRunning = false;
+  botState.connected = false;
+  isReconnecting = false;
+  clearBotTimeouts();
 
   if (bot) {
     bot.end();
@@ -1249,6 +1252,22 @@ function getReconnectDelay() {
   return delay + jitter;
 }
 
+function isRecoverableNetworkMessage(message) {
+  const msg = String(message || "").toLowerCase();
+  return (
+    msg.includes("socketclosed") ||
+    msg.includes("socket closed") ||
+    msg.includes("partialreaderror") ||
+    msg.includes("econnreset") ||
+    msg.includes("epipe") ||
+    msg.includes("etimedout") ||
+    msg.includes("enotfound") ||
+    msg.includes("timed out") ||
+    msg.includes("write after end") ||
+    msg.includes("this socket has been ended")
+  );
+}
+
 function createBot() {
   if (isReconnecting) {
     addLog("[Bot] Already reconnecting, skipping...");
@@ -1262,7 +1281,7 @@ function createBot() {
       bot.removeAllListeners();
       bot.end();
     } catch (e) {
-      addLog("[Cleanup] Error ending previous bot:", e.message);
+      addLog(`[Cleanup] Error ending previous bot: ${e.message}`);
     }
     bot = null;
   }
@@ -1297,7 +1316,7 @@ function createBot() {
           /* ignore */
         }
         bot = null;
-        scheduleReconnect();
+        scheduleReconnect("connection-timeout");
       }
     }, 150000); // 150s - Aternos servers can take 90-120s to finish spawning a player
 
@@ -1412,7 +1431,7 @@ function createBot() {
       }
 
       // ALWAYS reconnect — bot must never leave the server
-      scheduleReconnect();
+      scheduleReconnect(reason || "end");
     });
 
     bot.on("error", (err) => {
@@ -1428,23 +1447,40 @@ function createBot() {
         }
       }
 
-      // Don't reconnect on error - let 'end' event handle it
+      if (isRecoverableNetworkMessage(msg)) {
+        botState.connected = false;
+        clearAllIntervals();
+        scheduleReconnect("network-error");
+      }
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     addLog(`[Bot] Failed to create bot: ${message}`);
     switchToFallbackClient(message);
-    scheduleReconnect();
+    scheduleReconnect("create-failed");
   }
 }
 
-function scheduleReconnect() {
-  clearBotTimeouts();
-
-  // FIX: don't stack reconnect if already waiting
-  if (isReconnecting) {
-    addLog("[Bot] Reconnect already scheduled, skipping duplicate.");
+function scheduleReconnect(reason = "disconnect") {
+  if (!botRunning) {
+    addLog(`[Bot] Reconnect skipped (${reason}) because bot is stopped.`);
     return;
+  }
+
+  if (!config.utils["auto-reconnect"]) {
+    addLog(`[Bot] Reconnect skipped (${reason}) because auto-reconnect is disabled.`);
+    return;
+  }
+
+  // Keep the existing reconnect timer alive if another event arrives first.
+  if (isReconnecting) {
+    addLog(`[Bot] Reconnect already scheduled, keeping existing timer (${reason}).`);
+    return;
+  }
+
+  if (connectionTimeoutId) {
+    clearTimeout(connectionTimeoutId);
+    connectionTimeoutId = null;
   }
 
   isReconnecting = true;
@@ -1452,7 +1488,7 @@ function scheduleReconnect() {
 
   const delay = getReconnectDelay();
   addLog(
-    `[Bot] Reconnecting in ${delay / 1000}s (attempt #${botState.reconnectAttempts})`,
+    `[Bot] Reconnecting in ${delay / 1000}s (reason: ${reason}, attempt #${botState.reconnectAttempts})`,
   );
 
   reconnectTimeoutId = setTimeout(() => {
@@ -1461,6 +1497,12 @@ function scheduleReconnect() {
     createBot();
   }, delay);
 }
+
+setInterval(() => {
+  if (!botRunning || botState.connected || isReconnecting) return;
+  addLog("[Watchdog] Bot is offline with no reconnect scheduled - scheduling reconnect.");
+  scheduleReconnect("watchdog");
+}, 60000);
 
 // ============================================================
 // MODULE INITIALIZATION
@@ -2059,14 +2101,7 @@ process.on("uncaughtException", (err) => {
     botState.errors = botState.errors.slice(-50);
   }
 
-  const isNetworkError =
-    msg.includes("PartialReadError") ||
-    msg.includes("ECONNRESET") ||
-    msg.includes("EPIPE") ||
-    msg.includes("ETIMEDOUT") ||
-    msg.includes("timed out") ||
-    msg.includes("write after end") ||
-    msg.includes("This socket has been ended");
+  const isNetworkError = isRecoverableNetworkMessage(msg);
 
   if (isNetworkError) {
     addLog("[FATAL] Known network/protocol error - recovering gracefully...");
@@ -2091,7 +2126,7 @@ process.on("uncaughtException", (err) => {
 
   setTimeout(
     () => {
-      scheduleReconnect();
+      scheduleReconnect("uncaught-exception");
     },
     isNetworkError ? 5000 : 10000,
   );
@@ -2105,13 +2140,7 @@ process.on("unhandledRejection", (reason) => {
     botState.errors = botState.errors.slice(-50);
   }
 
-  const isNetworkError =
-    msg.includes("ETIMEDOUT") ||
-    msg.includes("ECONNRESET") ||
-    msg.includes("EPIPE") ||
-    msg.includes("ENOTFOUND") ||
-    msg.includes("timed out") ||
-    msg.includes("PartialReadError");
+  const isNetworkError = isRecoverableNetworkMessage(msg);
 
   if (isNetworkError && !isReconnecting) {
     addLog("[FATAL] Network rejection — triggering reconnect...");
@@ -2121,7 +2150,7 @@ process.on("unhandledRejection", (reason) => {
       try { bot.end(); } catch (_) {}
       bot = null;
     }
-    scheduleReconnect();
+    scheduleReconnect("unhandled-rejection");
   }
 });
 
