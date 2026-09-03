@@ -7,7 +7,7 @@
   },
   "server": {
     "ip": "funquintetSMP.aternos.me",
-    "port": 18,
+    "port": 18879,
     "version": "26.2",
     "fallback-version": "1.21.8",
     "try-creative": false
